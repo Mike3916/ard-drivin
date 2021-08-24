@@ -1,4 +1,5 @@
-# ard-drivin
+# ard-drivin (Modded version for use on Homemade Arduboys)
+
 'Ard Drivin' is an Arduboy racing game
 
 Coding: Rem
