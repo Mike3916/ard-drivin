@@ -12,7 +12,7 @@ License as published by the Free Software Foundation; either
 version 2.1 of the License, or (at your option) any later version.
 */
 
-#include "Arduboy2.h"
+#include "ArduboyRem.h"
 #include <ArduboyTones.h>
 #include "pics/playercar.h"
 #include "pics/playercar_bottom.h"
@@ -36,186 +36,9 @@ version 2.1 of the License, or (at your option) any later version.
 #include "pics/big_go.h"
 
 // Make an instance of arduboy used for many functions
-Arduboy2 arduboy;
+ArduboyRem arduboy;
 ArduboyTones sound(arduboy.audio.enabled);
 
-/* code from ArduboyRem */
-
-#include "pics/font.h"
-
-byte flicker = 0;
-
-const uint8_t PROGMEM yMask[] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 };
-
-#define pgm_read_byte_and_increment(addr)   \
-(__extension__({                \
-    uint16_t __addr16 = (uint16_t)(addr); \
-    uint8_t __result;           \
-    __asm__ __volatile__        \
-    (                           \
-        "lpm %0, Z+" "\n\t"            \
-        : "=r" (__result)       \
-        : "z" (__addr16)        \
-        : "r0"                  \
-    );                          \
-    __result;                   \
-}))
-
-void drawMaskBitmap(int8_t x, int8_t y, const uint8_t *bitmap, uint8_t hflip = 0)
-{
-	// Read size
-	uint8_t w = pgm_read_byte(bitmap++);
-	uint8_t h = pgm_read_byte(bitmap++);
-	// Read hotspot
-	int8_t hx = pgm_read_byte(bitmap++);
-	int8_t hy = pgm_read_byte(bitmap++);
-
-	y -= hy;
-	if (hflip == 0) {
-		x -= hx;
-	} else {
-		x -= w - hx;
-	}
-
-	// no need to draw at all if we're offscreen
-	int8_t endX = x + w;
-	if ((endX < 0 && x < 0)/* || x >= WIDTH*/ || int8_t(y + h) < 0 || y >= HEIGHT)
-		return;
-
-	//uint8_t yOffset = 1 << (y & 7);
-	uint8_t yOffset = pgm_read_byte(yMask + (y & 7));
-	const uint8_t* sourceAddress = bitmap;
-
-	int8_t sRow = y >> 3;
-	uint8_t uRow = sRow; // Same as 'sRow' but unsigned: will be used after clipping
-	uint8_t rows = (h + 7) >> 3;
-	// Top clipping: skip 'n' rows if outside the screen
-	if (sRow < 0) {
-		sourceAddress += (-sRow * w) << 1;
-		rows += sRow;
-		uRow = 0;
-	}
-	// Bottom clipping: stop as soon as we reach bottom of screen
-	if (uRow + rows > (HEIGHT >> 3)) {
-		rows = (HEIGHT >> 3) - uRow;
-	}
-	// Optimization: Perform 'x' clipping outside of loop
-	uint8_t startCol = 0;
-	uint8_t endCol = w;
-	if (x < 0) {
-		startCol = -x;
-	}
-	if (x + w > WIDTH) {
-		endCol = WIDTH - x;
-	}
-
-	if (hflip == 0) {
-		sourceAddress += (startCol << 1);
-	} else {
-		sourceAddress += ((w - endCol) << 1);
-	}
-	uint8_t sourceAddressSkip = (w - (endCol - startCol)) << 1;
-
-	if (hflip == 0) {
-		uint16_t destAddress = (uRow * WIDTH) + x + startCol;
-		uint8_t destAddressSkip = (WIDTH - (endCol - startCol));
-
-		for (uint8_t bRow = uRow; bRow < uint8_t(uRow + rows); bRow++, sourceAddress += sourceAddressSkip, destAddress += destAddressSkip) {
-			for (uint8_t iCol = startCol; iCol < endCol; iCol++, destAddress ++) {
-				// Draw mask first with AND and Draw color with OR:
-				// The GCC compiler is doing a poor job because of its constraint to keep 'r1' always 0 (two useless clr __zero_reg__ here)
-				// and also because it can't accept to keep the last 'mul' result in R1:R0, so there's a useless 'movw'. Total: 3 wasted clock cycles in this loop
-				uint16_t sourceMask = ~(pgm_read_byte_and_increment(sourceAddress) * yOffset);
-				uint16_t sourceByte = pgm_read_byte_and_increment(sourceAddress) * yOffset;
-
-				arduboy.sBuffer[destAddress] = (arduboy.sBuffer[destAddress] & uint8_t(sourceMask)) | uint8_t(sourceByte);
-				arduboy.sBuffer[destAddress + WIDTH] = (arduboy.sBuffer[destAddress + WIDTH] & uint8_t(sourceMask >> 8)) | uint8_t(sourceByte >> 8);
-			}
-		}
-	}
-	else {
-		uint16_t destAddress = (uRow * WIDTH) + x + endCol - 1;
-		uint8_t destAddressSkip = (WIDTH + (endCol - startCol));
-
-		for (uint8_t bRow = uRow; bRow < uint8_t(uRow + rows); bRow++, sourceAddress += sourceAddressSkip, destAddress += destAddressSkip) {
-			for (uint8_t iCol = startCol; iCol < endCol; iCol++, destAddress--) {
-				uint16_t sourceMask = ~(pgm_read_byte_and_increment(sourceAddress) * yOffset);
-				uint16_t sourceByte = pgm_read_byte_and_increment(sourceAddress) * yOffset;
-
-				arduboy.sBuffer[destAddress] = (arduboy.sBuffer[destAddress] & uint8_t(sourceMask)) | uint8_t(sourceByte);
-				arduboy.sBuffer[destAddress + WIDTH] = (arduboy.sBuffer[destAddress + WIDTH] & uint8_t(sourceMask >> 8)) | uint8_t(sourceByte >> 8);
-			}
-		}
-	}
-}
-
-/// Fast opaque unclipped: draw a full vertical byte (8 pixels) without any checks
-/// Warning: 'y' is not a pixel coordinate: it represents (y / 8), always aligned on a full byte.
-void inline drawByte(uint8_t x, uint8_t y, uint8_t color) {
- arduboy.sBuffer[(y*WIDTH) + x] = color;
-}
-
-void drawChar(uint8_t x, uint8_t y, unsigned char c)
-{
-	// RV optimization: get rid of 'size' scaling
-	// Also remove transparent check
-	// Force alignment on full byte in 'y'
-
-	if ((x >= WIDTH) || (y >= HEIGHT))
-	{
-		return;
-	}
-
-	y >>= 3;
-
-	for (uint8_t i = 0; i < 6; i++)
-	{
-		// use '~' to draw black on white text if font was created white on black
-		// Note: Font has been changed to 6x8, at starts at character 32 instead of 0, and ends a char 127 (instead of 255)
-		// so it occupies 6 bytes x 96 chars = 576 bytes (instead of the original arduboy font of 5 bytes x 256 chars = 1280 bytes)
-		drawByte(x + i, y, pgm_read_byte(font + ((c - 32) * 6) + i));
-	}
-	//drawByte(x + 5, y, 0);
-}
-
-void printBytePadded(uint8_t x, uint8_t y, byte num)
-{
-	int ten = num / 10;
-	int unit = num % 10;
-	drawChar(x, y, '0' + ten);
-	drawChar(x + 6, y, '0' + unit);
-}
-
-uint16_t nextFrameStart = 0;
-uint16_t eachFrameMicros = 0;
-
-void setFrameRate(uint16_t rate)
-{
-	eachFrameMicros = rate;
-}
-
-void nextFrame()
-{
-	do {
-		uint16_t now = micros();
-
-		// if it's not time for the next frame yet
-		int16_t diff = nextFrameStart - now;
-		if (diff < 0) {
-			// if we have more than 1ms to spare, lets sleep
-			// we should be woken up by timer0 every 1ms, so this should be ok
-			if (diff >= 1000)
-				arduboy.idle();
-			continue;
-		}
-
-		nextFrameStart += eachFrameMicros;
-		flicker++;
-		return;
-	} while (true);
-}
-
-/* end code from ArduboyRem*/
 
 void drawOutrunTrack();
 
@@ -258,8 +81,7 @@ byte trackPixWidth[44];
 int16_t trackStartX[44];
 
 // Perpective lookup table: for any y value (0..255), remap it to a perpective y value for our road (20..63)
-const byte PROGMEM yLookup[256] = { 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29, 29, 29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32, 32, 32, 32, 33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 35, 35, 35, 35, 35, 36, 36, 36, 36, 36, 37, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39, 40, 40, 40, 40, 41, 41, 41, 42, 42, 42, 43, 43, 43, 44, 44, 45, 45, 45, 46, 46, 47, 47, 48, 48, 49, 49, 50, 50, 51, 51, 52, 52, 53, 53, 54, 55, 55, 56, 57, 58, 58, 59, 60, 61, 62, 62, 63, };
-
+const byte PROGMEM yLookup[256] = { 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29, 29, 29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32, 32, 32, 32, 33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 35, 35, 35, 35, 35, 36, 36, 36, 36, 36, 37, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39, 40, 40, 40, 40, 41, 41, 41, 42, 42, 42, 43, 43, 43, 44, 44, 45, 45, 45, 46, 46, 47, 47, 48, 48, 49, 49, 50, 50, 51, 51, 52, 52, 53, 53, 54, 55, 55, 56, 57, 58, 58, 59, 60, 61, 62, 62, 63, };
 const PROGMEM byte* const PROGMEM puffBitmaps[] = { puff_1, puff_2, puff_3 };
 
 enum class EState : byte {
@@ -392,13 +214,13 @@ void UpdatePalm() {
 		if (palmState[i] == 1) {
 			palmx -= 8;
 			if (palmx >= 0) {
-				drawMaskBitmap(palmx, palmy, whichSprite2, false);
+				arduboy.drawMaskBitmap(palmx, palmy, whichSprite2, false);
 			}
 		}
 		else {
 			palmx += 8 + (trackPixWidth[palmy - 20] << 1);
 			if (palmx <= 136) {
-				drawMaskBitmap(palmx, palmy, whichSprite2, true);
+				arduboy.drawMaskBitmap(palmx, palmy, whichSprite2, true);
 			}
 		}
 	}
@@ -444,7 +266,7 @@ void UpdateEnemy() {
 	if (currentRoadCurve < -2000 || ex > 64) {
 		hflip = 1;
 	}
-	drawMaskBitmap(ex, ey, whichSprite, hflip);
+	arduboy.drawMaskBitmap(ex, ey, whichSprite, hflip);
 
 	// Detect collision with player:
 	int8_t dx = (playerX - enemyX) >> 8;
@@ -487,11 +309,11 @@ void SetState(EState inState) {
 
 void TitleState()
 {
-	drawMaskBitmap(0, 0, title);
+	arduboy.drawMaskBitmap(0, 0, title);
 	if (stateFrame > 120) {
 		arduboy.setCursor(104, 0);
 		arduboy.print("Sfx");
-		drawChar(122, 0, arduboy.audio.enabled() ? '@' : ' ');
+		arduboy.drawChar(122, 0, arduboy.audio.enabled() ? '@' : ' ');
 	}
 
 	if (stateFrame > 300) {
@@ -526,7 +348,7 @@ void TitleState()
 
 void InstructionsState()
 {
-	drawMaskBitmap(0, 0, instructions);
+	arduboy.drawMaskBitmap(0, 0, instructions);
 
 	if (arduboy.justPressed(A_BUTTON) || stateFrame > 900)
 	{
@@ -552,62 +374,62 @@ void DrawCountdown() {
 		break;
 	}
 	if (whichSprite) {
-		drawMaskBitmap(64, 23, whichSprite);
+		arduboy.drawMaskBitmap(64, 23, whichSprite);
 	}
 }
 
 void DrawHud() {
-	drawByte(0, 0, 0xFF);
-	drawByte(1, 0, 0x81);
+	arduboy.drawByte(0, 0, 0xFF);
+	arduboy.drawByte(1, 0, 0x81);
 	// Convert speed (0..220) to a speedmeter range of 0..33
 	byte speedometer = (speed * 39) >> 8;
-	if (speedometer > 0 && flicker & 2) {
+	if (speedometer > 0 && arduboy.flicker & 2) {
 		speedometer--;
 	}
 	for (byte i = 0; i < speedometer; i++) {
-		drawByte(i + 2, 0, 0xBD);
+		arduboy.drawByte(i + 2, 0, 0xBD);
 	}
 	for (byte i = speedometer; i < 33; i++) {
-		drawByte(i + 2, 0, 0x81);
+		arduboy.drawByte(i + 2, 0, 0x81);
 	}
-	drawByte(35, 0, 0x81);
+	arduboy.drawByte(35, 0, 0x81);
 	for (byte i = 36; i <= 56; i++) {
-		drawByte(i, 0, 0xFF);
+		arduboy.drawByte(i, 0, 0xFF);
 	}
 	for (byte i = 69; i <= 115; i++) {
-		drawByte(i, 0, 0xFF);
+		arduboy.drawByte(i, 0, 0xFF);
 	}
 
 	//for (byte i = 0; i < 128; i++) {
-	//	drawByte(i, 0, 0xFF);
+	//	arduboy.drawByte(i, 0, 0xFF);
 	//}
 
 	if (gameTimer <= 99) {
-		printBytePadded(57, 0, gameTimer);
+		arduboy.printBytePadded(57, 0, gameTimer);
 	}
 
-	byte flickerGear = flicker & 4;
-	// Flicker the currently selected gear
+	byte flickerGear = arduboy.flicker & 4;
+	// arduboy.flicker the currently selected gear
 	if ((gear == 1) || flickerGear) {
-		drawChar(81, 0, 'L');
+		arduboy.drawChar(81, 0, 'L');
 	}
 	if ((gear == 0) || flickerGear) {
-		drawChar(93, 0, 'H');
+		arduboy.drawChar(93, 0, 'H');
 	}
 
 	if (gear == 0) {
 		// Blink the arrow when running fast in low gear (indicating it is time to switch in high gear)
 		if (speed > 120 && flickerGear) {
-			drawChar(87, 0, '>');
+			arduboy.drawChar(87, 0, '>');
 		}
 	}
 	else {
 		// Blink the arrow when running too slow in high gear (accelerate would be better in low gear)
 		if (speed < 120 && flickerGear) {
-			drawChar(87, 0, '<');
+			arduboy.drawChar(87, 0, '<');
 		}
 	}
-	printBytePadded(116, 0, score);
+	arduboy.printBytePadded(116, 0, score);
 
 	if (gameTimer == 0) {
 		arduboy.setCursor(31, 32);
@@ -685,7 +507,7 @@ void GameState()
 		}
 		else {
 			if (speed < 120) { // If running a low speed but in high gear, make it ineffective
-				if ((flicker & 3) == 0) {
+				if ((arduboy.flicker & 3) == 0) {
 					speed++;
 				}
 			}
@@ -758,15 +580,15 @@ void GameState()
 	// No need to clear, since 'paintScreen' does it for free.
 	// arduboy.clear();
 	drawOutrunTrack();
-	//arduboy.drawTurboBitmap(x - 24, y - 24, pgm_read_ptr(mypics + (flicker & 1)), 85, 64);
+	//arduboy.drawTurboBitmap(x - 24, y - 24, pgm_read_ptr(mypics + (arduboy.flicker & 1)), 85, 64);
 	//arduboy.drawGrayBitmap(x - 24, y - 24, outrun, 82, 40);
 
 	//for (byte i = 0; i < 6; ++i) {
-	//	drawMaskBitmap(i, i + 8, outrun);
+	//	arduboy.drawMaskBitmap(i, i + 8, outrun);
 	//}
-	//drawMaskBitmap(-127, -127, outrun, hflip);
-	drawMaskBitmap((backgroundXOffset >> 8), 8, skybox, false);
-	drawMaskBitmap((backgroundXOffset >> 8) + 128, 8, skybox, false);
+	//arduboy.drawMaskBitmap(-127, -127, outrun, hflip);
+	arduboy.drawMaskBitmap((backgroundXOffset >> 8), 8, skybox, false);
+	arduboy.drawMaskBitmap((backgroundXOffset >> 8) + 128, 8, skybox, false);
 
 	UpdatePalm();
 	UpdateEnemy();
@@ -774,16 +596,16 @@ void GameState()
 	// Draw player car
 	int8_t py = playerY >> 8;
 	int8_t px = GetScreenXPos(playerX >> 8, py);
-	drawMaskBitmap(px, py, playercar_bottom, hflip);
+	arduboy.drawMaskBitmap(px, py, playercar_bottom, hflip);
 
 	// Make tire animate according to current accumulator
 	if (gameTimer <= 99) {
 		int8_t tireOverlay = (speedAcc & 256) ? -17 : 13;
-		drawMaskBitmap(px + tireOverlay, py, playercar_tire2);
+		arduboy.drawMaskBitmap(px + tireOverlay, py, playercar_tire2);
 	}
 
 	int8_t carBobOffset = (speedAcc & 512) ? -6 : -5;
-	drawMaskBitmap(px, py + carBobOffset, playercar, hflip);
+	arduboy.drawMaskBitmap(px, py + carBobOffset, playercar, hflip);
 
 	// If puff is off and player is moving left/right and speed is high enough and we are in a steep curve, then emit a puff
 	if (puffFrame == -1 && isMovingSide && speed > 100 && (roadCurve8 > 15 || roadCurve8 < -15)) {
@@ -793,8 +615,8 @@ void GameState()
 	}
 	// If puff is currently active: make it animate then die
 	if (puffFrame != -1) {
-		drawMaskBitmap(puffX, puffY, (const byte*)pgm_read_ptr(puffBitmaps + (puffFrame >> 4)), 0);
-		drawMaskBitmap(puffX + 34, puffY, (const byte*)pgm_read_ptr(puffBitmaps + (puffFrame >> 4)), 1);
+		arduboy.drawMaskBitmap(puffX, puffY, (const byte*)pgm_read_ptr(puffBitmaps + (puffFrame >> 4)), 0);
+		arduboy.drawMaskBitmap(puffX + 34, puffY, (const byte*)pgm_read_ptr(puffBitmaps + (puffFrame >> 4)), 1);
 
 		puffFrame += 8;
 		if (puffFrame >= (3 << 4)) {
@@ -802,7 +624,7 @@ void GameState()
 		}
 	}
 
-	//arduboy.drawFastHLine(10, 5, 100, flicker & 1);
+	//arduboy.drawFastHLine(10, 5, 100, arduboy.flicker & 1);
 	//arduboy.drawFastHLine(10, 6, 100, 1);
 
 	// we set our cursor x pixels to the right and y down from the top
@@ -810,7 +632,7 @@ void GameState()
 
 	//// pixel 0 is always full black
 	//for (byte i = 1; i < 32; ++i) {
-	//	if (flicker % (63 / i) == 0) {
+	//	if (arduboy.flicker % (63 / i) == 0) {
 	//		arduboy.drawFastHLine(80, i, 38, 1);
 	//	}
 	//	else {
@@ -849,9 +671,9 @@ void GameState()
 
 	// Only play sound during actual play, not while gameover:
 	if (currentState == EState::Game) {
-		if ((flicker & 1) == 0) {
+		if ((arduboy.flicker & 1) == 0) {
 			uint16_t freq = 16 + (speed >> 1);
-			if (puffFrame != -1 && (flicker & 2) == 0) {
+			if (puffFrame != -1 && (arduboy.flicker & 2) == 0) {
 				freq = 800;
 			}
 			sound.tone(freq, 50);
@@ -1005,7 +827,7 @@ void drawOutrunTrack() {
 void loop() {
 	// uint16_t startMicros = micros();
 	// pause render until it's time for the next frame
-	nextFrame();
+	arduboy.nextFrame();
 	// uint16_t afterWaitMicros = micros();
 
 	//arduboy.LCDCommandMode();
@@ -1018,7 +840,7 @@ void loop() {
 	arduboy.display();
     // fill display buffer with pattern, added because not using ArduboyRem
     uint16_t pattern = 0xAA55;
-    if (flicker & 1) pattern = ~pattern;
+    if (arduboy.flicker & 1) pattern = ~pattern;
     for (uint16_t i=0; i < (WIDTH * HEIGHT / 8);)
     {
         arduboy.sBuffer[i++] = pattern & 0xFF;
